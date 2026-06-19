@@ -230,6 +230,7 @@ DT_MODULE(1)
 #define CONF_BIT_DEPTH "plugins/lighttable/neural_restore/bit_depth"
 #define CONF_ADD_CATALOG "plugins/lighttable/neural_restore/add_to_catalog"
 #define CONF_PRESERVE_RATING_COLOR_LABEL "plugins/lighttable/neural_restore/preserve_rating_color_label"
+#define CONF_COPY_DT_METADATA "plugins/lighttable/neural_restore/copy_dt_metadata"
 #define CONF_OUTPUT_DIR "plugins/lighttable/neural_restore/output_directory"
 #define CONF_ICC_TYPE "plugins/lighttable/neural_restore/icc_type"
 #define CONF_ICC_FILE "plugins/lighttable/neural_restore/icc_filename"
@@ -367,6 +368,7 @@ typedef struct dt_lib_neural_restore_t
   GtkWidget *preserve_wide_gamut_toggle;
   GtkWidget *catalog_toggle;
   GtkWidget *preserve_rating_color_label_toggle;
+  GtkWidget *copy_dt_metadata_toggle;
   GtkWidget *output_dir_entry;
   GtkWidget *output_dir_button;
 } dt_lib_neural_restore_t;
@@ -389,6 +391,7 @@ typedef struct dt_neural_job_t
   dt_neural_bpp_t bpp;
   gboolean add_to_catalog;
   gboolean preserve_rating_color_label;
+  gboolean copy_dt_metadata;
   char *output_dir;  // NULL = same as source
   // output color profile. DT_COLORSPACE_NONE means "use image's working profile"
   dt_colorspaces_color_profile_type_t icc_type;
@@ -985,7 +988,8 @@ static int _ai_write_image(dt_imageio_module_data_t *data,
 
 static void _import_image(const char *filename,
                           const dt_imgid_t source_imgid,
-                          const gboolean preserve_rating_color_label)
+                          const gboolean preserve_rating_color_label,
+                          const gboolean copy_dt_metadata)
 {
   dt_film_t film;
   dt_film_init(&film);
@@ -1023,6 +1027,25 @@ static void _import_image(const char *filename,
           {
             dt_colorlabels_set_label(newid, color);
           }
+        }
+      }
+
+      if(copy_dt_metadata)
+      {
+        dt_image_geoloc_t geoloc;
+        dt_image_get_location(source_imgid, &geoloc);
+        if(!isnan(geoloc.longitude) && !isnan(geoloc.latitude))
+        {
+          dt_image_set_location(newid, &geoloc, FALSE, FALSE);
+        }
+
+        GList *meta = dt_metadata_get_list_id(source_imgid);
+        if(meta)
+        {
+          GList *imgs = g_list_append(NULL, GINT_TO_POINTER(newid));
+          dt_metadata_set_list_id(imgs, meta, FALSE, FALSE);
+          g_list_free(imgs);
+          g_list_free_full(meta, g_free);
         }
       }
 
@@ -1596,7 +1619,7 @@ static int32_t _process_job_run(dt_job_t *job)
     }
 
     if(j->add_to_catalog)
-      _import_image(filename, imgid, j->preserve_rating_color_label);
+      _import_image(filename, imgid, j->preserve_rating_color_label, j->copy_dt_metadata);
     successes++;
     dt_control_job_set_progress(job, (double)++count / total);
   }
@@ -3330,6 +3353,10 @@ static void _process_clicked(GtkWidget *widget, gpointer user_data)
     = dt_conf_key_exists(CONF_PRESERVE_RATING_COLOR_LABEL)
       ? dt_conf_get_bool(CONF_PRESERVE_RATING_COLOR_LABEL)
       : TRUE;
+  job_data->copy_dt_metadata
+    = dt_conf_key_exists(CONF_COPY_DT_METADATA)
+      ? dt_conf_get_bool(CONF_COPY_DT_METADATA)
+      : TRUE;
   char *out_dir = dt_conf_get_string(CONF_OUTPUT_DIR);
   job_data->output_dir
     = (out_dir && out_dir[0]) ? out_dir : NULL;
@@ -4143,7 +4170,7 @@ static void _catalog_toggle_changed(GtkWidget *w,
   const gboolean active
     = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w));
   dt_conf_set_bool(CONF_ADD_CATALOG, active);
-  gtk_widget_set_sensitive(d->preserve_rating_color_label_toggle, active);
+  gtk_widget_set_sensitive(d->copy_dt_metadata_toggle, active);
 }
 
 static void _preserve_rating_color_label_toggled(GtkWidget *w,
@@ -4152,6 +4179,14 @@ static void _preserve_rating_color_label_toggled(GtkWidget *w,
   const gboolean active
     = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w));
   dt_conf_set_bool(CONF_PRESERVE_RATING_COLOR_LABEL, active);
+}
+
+static void _copy_dt_metadata_toggled(GtkWidget *w,
+                                      dt_lib_module_t *self)
+{
+  const gboolean active
+    = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w));
+  dt_conf_set_bool(CONF_COPY_DT_METADATA, active);
 }
 
 static void _preserve_wide_gamut_toggled(GtkWidget *w,
@@ -4416,14 +4451,27 @@ void gui_init(dt_lib_module_t *self)
                                  ? dt_conf_get_bool(CONF_ADD_CATALOG)
                                  : TRUE);
   gtk_widget_set_tooltip_text(d->catalog_toggle,
-                              _("automatically import the output image into"
-                                " the current collection"));
+                               _("automatically import the output image into"
+                                 " the current collection"));
   g_signal_connect(d->catalog_toggle, "toggled",
                    G_CALLBACK(_catalog_toggle_changed), self);
   dt_gui_box_add(cs_box, d->catalog_toggle);
 
-  // preserve rating and color label
-  d->preserve_rating_color_label_toggle = gtk_check_button_new_with_label(_("preserve rating and color label"));
+  // copy darktable metadata
+  d->copy_dt_metadata_toggle = gtk_check_button_new_with_label(_("copy darktable metadata"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->copy_dt_metadata_toggle),
+                               dt_conf_key_exists(CONF_COPY_DT_METADATA)
+                                 ? dt_conf_get_bool(CONF_COPY_DT_METADATA)
+                                 : TRUE);
+  gtk_widget_set_tooltip_text(d->copy_dt_metadata_toggle,
+                              _("copy manual geolocation coordinates and database-only metadata (title, description, etc.) to the denoised image"));
+  g_signal_connect(d->copy_dt_metadata_toggle, "toggled",
+                   G_CALLBACK(_copy_dt_metadata_toggled), self);
+  gtk_widget_set_margin_start(d->copy_dt_metadata_toggle, DT_PIXEL_APPLY_DPI(12));
+  dt_gui_box_add(cs_box, d->copy_dt_metadata_toggle);
+
+  // copy rating and color label
+  d->preserve_rating_color_label_toggle = gtk_check_button_new_with_label(_("copy rating and color label"));
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->preserve_rating_color_label_toggle),
                                dt_conf_key_exists(CONF_PRESERVE_RATING_COLOR_LABEL)
                                  ? dt_conf_get_bool(CONF_PRESERVE_RATING_COLOR_LABEL)
@@ -4435,7 +4483,7 @@ void gui_init(dt_lib_module_t *self)
   dt_gui_box_add(cs_box, d->preserve_rating_color_label_toggle);
 
   const gboolean catalog_active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->catalog_toggle));
-  gtk_widget_set_sensitive(d->preserve_rating_color_label_toggle, catalog_active);
+  gtk_widget_set_sensitive(d->copy_dt_metadata_toggle, catalog_active);
 
   // output directory
   GtkWidget *dir_box = dt_gui_hbox();
