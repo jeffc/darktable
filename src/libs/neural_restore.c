@@ -201,6 +201,7 @@
 #include "common/film.h"
 #include "common/grouping.h"
 #include "common/image_cache.h"
+#include "common/colorlabels.h"
 #include "common/mipmap_cache.h"
 #include "common/tags.h"
 #include "control/jobs/control_jobs.h"
@@ -228,6 +229,7 @@ DT_MODULE(1)
 #define CONF_ACTIVE_PAGE "plugins/lighttable/neural_restore/active_page"
 #define CONF_BIT_DEPTH "plugins/lighttable/neural_restore/bit_depth"
 #define CONF_ADD_CATALOG "plugins/lighttable/neural_restore/add_to_catalog"
+#define CONF_PRESERVE_RATING_COLOR_LABEL "plugins/lighttable/neural_restore/preserve_rating_color_label"
 #define CONF_OUTPUT_DIR "plugins/lighttable/neural_restore/output_directory"
 #define CONF_ICC_TYPE "plugins/lighttable/neural_restore/icc_type"
 #define CONF_ICC_FILE "plugins/lighttable/neural_restore/icc_filename"
@@ -364,6 +366,7 @@ typedef struct dt_lib_neural_restore_t
   GtkWidget *profile_combo;
   GtkWidget *preserve_wide_gamut_toggle;
   GtkWidget *catalog_toggle;
+  GtkWidget *preserve_rating_color_label_toggle;
   GtkWidget *output_dir_entry;
   GtkWidget *output_dir_button;
 } dt_lib_neural_restore_t;
@@ -385,6 +388,7 @@ typedef struct dt_neural_job_t
   dt_lib_module_t *self;
   dt_neural_bpp_t bpp;
   gboolean add_to_catalog;
+  gboolean preserve_rating_color_label;
   char *output_dir;  // NULL = same as source
   // output color profile. DT_COLORSPACE_NONE means "use image's working profile"
   dt_colorspaces_color_profile_type_t icc_type;
@@ -980,7 +984,8 @@ static int _ai_write_image(dt_imageio_module_data_t *data,
 }
 
 static void _import_image(const char *filename,
-                          const dt_imgid_t source_imgid)
+                          const dt_imgid_t source_imgid,
+                          const gboolean preserve_rating_color_label)
 {
   dt_film_t film;
   dt_film_init(&film);
@@ -995,13 +1000,40 @@ static void _import_image(const char *filename,
     dt_print(DT_DEBUG_AI, "[neural_restore] imported imgid=%d: %s", newid, filename);
     if(dt_is_valid_imgid(source_imgid))
     {
-      dt_grouping_add_to_group(source_imgid, newid);
+      if(preserve_rating_color_label)
+      {
+        const dt_image_t *src = dt_image_cache_get(source_imgid, 'r');
+        int rating = 0;
+        if(src)
+        {
+          rating = dt_image_get_xmp_rating(src);
+          dt_image_cache_read_release(src);
+        }
+        dt_image_t *img = dt_image_cache_get(newid, 'w');
+        if(img)
+        {
+          dt_image_set_xmp_rating(img, rating);
+          dt_image_cache_write_release(img, DT_IMAGE_CACHE_SAFE);
+        }
+
+        const int color_labels = dt_colorlabels_get_labels(source_imgid);
+        for(int color = 0; color < DT_COLORLABELS_LAST; color++)
+        {
+          if(color_labels & (1 << color))
+          {
+            dt_colorlabels_set_label(newid, color);
+          }
+        }
+      }
+
+      const dt_image_t *src = dt_image_cache_get(source_imgid, 'r');
+      const dt_imgid_t grpid = src ? src->group_id : NO_IMGID;
+      dt_image_cache_read_release(src);
+      dt_grouping_add_to_group(grpid, newid);
       // promote the output as group leader, but only when the source
       // was the current leader — preserves any manually-set leader the
       // user deliberately chose
-      const dt_image_t *src = dt_image_cache_get(source_imgid, 'r');
-      const gboolean source_is_leader = src && src->group_id == source_imgid;
-      dt_image_cache_read_release(src);
+      const gboolean source_is_leader = (grpid == source_imgid);
       if(source_is_leader)
         dt_grouping_change_representative(newid);
 
@@ -1564,7 +1596,7 @@ static int32_t _process_job_run(dt_job_t *job)
     }
 
     if(j->add_to_catalog)
-      _import_image(filename, imgid);
+      _import_image(filename, imgid, j->preserve_rating_color_label);
     successes++;
     dt_control_job_set_progress(job, (double)++count / total);
   }
@@ -3294,6 +3326,10 @@ static void _process_clicked(GtkWidget *widget, gpointer user_data)
     = dt_conf_key_exists(CONF_ADD_CATALOG)
       ? dt_conf_get_bool(CONF_ADD_CATALOG)
       : TRUE;
+  job_data->preserve_rating_color_label
+    = dt_conf_key_exists(CONF_PRESERVE_RATING_COLOR_LABEL)
+      ? dt_conf_get_bool(CONF_PRESERVE_RATING_COLOR_LABEL)
+      : TRUE;
   char *out_dir = dt_conf_get_string(CONF_OUTPUT_DIR);
   job_data->output_dir
     = (out_dir && out_dir[0]) ? out_dir : NULL;
@@ -4103,9 +4139,19 @@ static void _profile_combo_changed(GtkWidget *w,
 static void _catalog_toggle_changed(GtkWidget *w,
                                     dt_lib_module_t *self)
 {
+  dt_lib_neural_restore_t *d = (dt_lib_neural_restore_t *)self->data;
   const gboolean active
     = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w));
   dt_conf_set_bool(CONF_ADD_CATALOG, active);
+  gtk_widget_set_sensitive(d->preserve_rating_color_label_toggle, active);
+}
+
+static void _preserve_rating_color_label_toggled(GtkWidget *w,
+                                                 dt_lib_module_t *self)
+{
+  const gboolean active
+    = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(w));
+  dt_conf_set_bool(CONF_PRESERVE_RATING_COLOR_LABEL, active);
 }
 
 static void _preserve_wide_gamut_toggled(GtkWidget *w,
@@ -4364,7 +4410,6 @@ void gui_init(dt_lib_module_t *self)
   dt_gui_box_add(cs_box, d->preserve_wide_gamut_toggle);
 
   // add to catalog
-  GtkWidget *catalog_box = dt_gui_hbox();
   d->catalog_toggle = gtk_check_button_new_with_label(_("add to the current collection"));
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->catalog_toggle),
                                dt_conf_key_exists(CONF_ADD_CATALOG)
@@ -4375,8 +4420,22 @@ void gui_init(dt_lib_module_t *self)
                                 " the current collection"));
   g_signal_connect(d->catalog_toggle, "toggled",
                    G_CALLBACK(_catalog_toggle_changed), self);
-  dt_gui_box_add(catalog_box, d->catalog_toggle);
-  dt_gui_box_add(cs_box, catalog_box);
+  dt_gui_box_add(cs_box, d->catalog_toggle);
+
+  // preserve rating and color label
+  d->preserve_rating_color_label_toggle = gtk_check_button_new_with_label(_("preserve rating and color label"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(d->preserve_rating_color_label_toggle),
+                               dt_conf_key_exists(CONF_PRESERVE_RATING_COLOR_LABEL)
+                                 ? dt_conf_get_bool(CONF_PRESERVE_RATING_COLOR_LABEL)
+                                 : TRUE);
+  gtk_widget_set_tooltip_text(d->preserve_rating_color_label_toggle,
+                              _("copy the rating and color labels from the original image to the denoised image"));
+  g_signal_connect(d->preserve_rating_color_label_toggle, "toggled",
+                   G_CALLBACK(_preserve_rating_color_label_toggled), self);
+  dt_gui_box_add(cs_box, d->preserve_rating_color_label_toggle);
+
+  const gboolean catalog_active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(d->catalog_toggle));
+  gtk_widget_set_sensitive(d->preserve_rating_color_label_toggle, catalog_active);
 
   // output directory
   GtkWidget *dir_box = dt_gui_hbox();
