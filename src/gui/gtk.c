@@ -226,7 +226,7 @@ static void _focuspeaking_switch_button_callback(GtkWidget *button,
   gtk_widget_queue_draw(button);
 
   // make sure the second window if active is updated
-  dt_dev_reprocess_center(darktable.develop);
+  dt_dev_reprocess_center(darktable.develop, INT_MAX);
 
   // we inform that all thumbnails need to be redraw
   DT_CONTROL_SIGNAL_RAISE(DT_SIGNAL_DEVELOP_MIPMAP_UPDATED, -1);
@@ -603,7 +603,8 @@ gboolean dt_gui_get_scroll_delta(const GdkEventScroll *event,
   gdouble delta_x, delta_y;
   if(dt_gui_get_scroll_deltas(event, &delta_x, &delta_y))
   {
-    *delta = delta_x + delta_y;
+    // treat right like up, left like down
+    *delta = fabs(delta_x) > fabs(delta_y) ? -delta_x : delta_y;
     return TRUE;
   }
   return FALSE;
@@ -615,7 +616,8 @@ gboolean dt_gui_get_scroll_unit_delta(const GdkEventScroll *event,
   int delta_x, delta_y;
   if(dt_gui_get_scroll_unit_deltas(event, &delta_x, &delta_y))
   {
-    *delta = delta_x + delta_y;
+    // treat right like up, left like down
+    *delta = abs(delta_x) > abs(delta_y) ? -delta_x : delta_y;
     return TRUE;
   }
   return FALSE;
@@ -4020,16 +4022,19 @@ GtkNotebook *dt_ui_notebook_new(dt_action_def_t *def)
 
 static gboolean _notebook_scroll_callback(GtkNotebook *notebook,
                                           GdkEventScroll *event,
-                                          gpointer user_data)
-{
+                                          gpointer user_data) {
   if(dt_gui_ignore_scroll(event)) return FALSE;
 
-  int delta = 0;
-  if(dt_gui_get_scroll_unit_delta(event, &delta) && delta)
+  int delta_x = 0, delta_y = 0;
+  if(dt_gui_get_scroll_unit_deltas(event, &delta_x, &delta_y))
+  {
+    // RIGHT: delta_x > 0, DOWN: delta_y > 0 -> next, like in filmstrip and lists
+    const int delta = abs(delta_x) > abs(delta_y) ? -delta_x : -delta_y;
     _action_process_tabs(notebook, DT_ACTION_EFFECT_DEFAULT_KEY,
                          delta < 0
                          ? DT_ACTION_EFFECT_NEXT
                          : DT_ACTION_EFFECT_PREVIOUS, delta);
+  }
 
   return TRUE;
 }
@@ -4144,10 +4149,8 @@ static gint _get_container_row_heigth(GtkWidget *w)
                                         NULL, NULL, NULL, NULL, &cell_height);
       if(cell_height > row_height) row_height = cell_height;
     }
-    GValue separation = { G_TYPE_INT };
-    gtk_widget_style_get_property(w, "vertical-separator", &separation);
-
-    if(row_height > 0) height = row_height + g_value_get_int(&separation);
+    /* GtkTreeView's vertical-separator style property defaults to 2 (GTK3 source: #define _TREE_VIEW_VERTICAL_SEPARATOR 2) */
+    if(row_height > 0) height = row_height + 2;
   }
   else if(GTK_IS_TEXT_VIEW(w))
   {

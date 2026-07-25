@@ -192,12 +192,12 @@ int legacy_params(dt_iop_module_t *self,
                   int32_t *new_params_size,
                   int *new_version)
 {
-  typedef dt_iop_useless_params_v3_t
+  typedef struct dt_iop_useless_params_v3_t
   {
     int checker_scale;
     float factor;
     int strength;
-  }
+  } dt_iop_useless_params_v3_t;
 
   // do migration from 2 to 3 (one step at a time, this legacy_params
   // update is incremental and will be done as many time as needed to
@@ -210,7 +210,7 @@ int legacy_params(dt_iop_module_t *self,
     {
        int checker_scale;
        float factor;
-    } dt_iop_basecurve_params_v5_t;
+    } dt_iop_useless_params_v2_t;
 
     dt_iop_useless_params_v2_t *o = (dt_iop_useless_params_v2_t *)old_params;
     dt_iop_useless_params_v3_t *n = malloc(sizeof(dt_iop_useless_params_v3_t));
